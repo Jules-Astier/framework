@@ -191,6 +191,7 @@ export interface LiveEventProviderRef {
     providerId: string
     internalEventId?: string
     href?: string
+    hrefs?: string[]
     lastChecked: string
     sourceCount: number
 }
@@ -226,6 +227,7 @@ export interface ProviderLiveEventCandidate {
     }
     region?: string
     href?: string
+    hrefs?: string[]
     sourceCount?: number
 }
 
@@ -235,5 +237,6 @@ export interface LiveSourceResponse extends SourceResponse {
 
 export interface LiveProvider {
     getLiveEvents?(): Promise<ProviderLiveEventCandidate[]>
+    matchLiveEvent?(event: LiveEventManifest): Promise<ProviderLiveEventCandidate | undefined>
     getLiveEventSources(event: LiveEventManifest): Promise<ProviderResult>
 }

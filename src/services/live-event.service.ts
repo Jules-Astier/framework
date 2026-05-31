@@ -133,7 +133,42 @@ export class LiveEventService {
             }
         }
 
-        return Array.from(manifests.values()).sort((left, right) => left.startsAt.localeCompare(right.startsAt) || left.title.localeCompare(right.title))
+        const enriched = await this.enrichEvents(Array.from(manifests.values()), checkedAt)
+        return enriched.sort((left, right) => left.startsAt.localeCompare(right.startsAt) || left.title.localeCompare(right.title))
+    }
+
+    private async enrichEvents(events: LiveEventManifest[], checkedAt: string): Promise<LiveEventManifest[]> {
+        const matchers = this.registry
+            .getLiveProviders()
+            .filter((provider): provider is BaseProvider & LiveProvider & { matchLiveEvent: (event: LiveEventManifest) => Promise<ProviderLiveEventCandidate | undefined> } => typeof provider.matchLiveEvent === 'function')
+
+        if (!matchers.length) {
+            return events
+        }
+
+        const enriched: LiveEventManifest[] = []
+        for (const event of events) {
+            let nextEvent = event
+
+            for (const provider of matchers) {
+                if (nextEvent.providers.some((ref) => ref.providerId === provider.id)) {
+                    continue
+                }
+
+                try {
+                    const candidate = await provider.matchLiveEvent(nextEvent)
+                    if (candidate) {
+                        nextEvent = this.mergeProviderCandidate(nextEvent, candidate, provider, checkedAt)
+                    }
+                } catch {
+                    continue
+                }
+            }
+
+            enriched.push(nextEvent)
+        }
+
+        return enriched
     }
 
     private async fetchLiveSources(providers: Array<BaseProvider & LiveProvider>, event: LiveEventManifest): Promise<ProviderResult[]> {
@@ -167,13 +202,7 @@ export class LiveEventService {
         const league = this.normalizeToken(candidate.league ?? 'live')
         const sport = this.normalizeToken(candidate.sport ?? league)
         const status = candidate.status ?? this.deriveStatus(startsAt, endsAt)
-        const providerRef: LiveEventProviderRef = {
-            providerId: provider.id,
-            internalEventId: candidate.internalEventId,
-            href: candidate.href,
-            lastChecked: checkedAt,
-            sourceCount: candidate.sourceCount ?? 0,
-        }
+        const providerRef = this.providerRefFromCandidate(candidate, provider, checkedAt)
 
         return {
             id: this.eventIdFor(candidate.title, league, sport, startsAt),
@@ -194,11 +223,7 @@ export class LiveEventService {
 
         for (const provider of right.providers) {
             const existing = providerRefs.get(provider.providerId)
-            providerRefs.set(provider.providerId, {
-                ...existing,
-                ...provider,
-                sourceCount: Math.max(existing?.sourceCount ?? 0, provider.sourceCount),
-            })
+            providerRefs.set(provider.providerId, this.mergeProviderRefs(existing, provider))
         }
 
         return {
@@ -208,6 +233,44 @@ export class LiveEventService {
             teams: left.teams ?? right.teams,
             region: left.region ?? right.region,
             providers: Array.from(providerRefs.values()).sort((a, b) => a.providerId.localeCompare(b.providerId)),
+        }
+    }
+
+    private mergeProviderCandidate(event: LiveEventManifest, candidate: ProviderLiveEventCandidate, provider: BaseProvider, checkedAt: string): LiveEventManifest {
+        const providerRef = this.providerRefFromCandidate(candidate, provider, checkedAt)
+        const providerRefs = new Map(event.providers.map((ref) => [ref.providerId, ref]))
+        providerRefs.set(provider.id, this.mergeProviderRefs(providerRefs.get(provider.id), providerRef))
+
+        return {
+            ...event,
+            teams: event.teams ?? candidate.teams,
+            region: event.region ?? candidate.region,
+            providers: Array.from(providerRefs.values()).sort((a, b) => a.providerId.localeCompare(b.providerId)),
+        }
+    }
+
+    private providerRefFromCandidate(candidate: ProviderLiveEventCandidate, provider: BaseProvider, checkedAt: string): LiveEventProviderRef {
+        const hrefs = this.unique([candidate.href, ...(candidate.hrefs ?? [])])
+
+        return {
+            providerId: provider.id,
+            internalEventId: candidate.internalEventId,
+            href: hrefs[0],
+            hrefs: hrefs.length ? hrefs : undefined,
+            lastChecked: checkedAt,
+            sourceCount: candidate.sourceCount ?? hrefs.length,
+        }
+    }
+
+    private mergeProviderRefs(existing: LiveEventProviderRef | undefined, provider: LiveEventProviderRef): LiveEventProviderRef {
+        const hrefs = this.unique([existing?.href, ...(existing?.hrefs ?? []), provider.href, ...(provider.hrefs ?? [])])
+
+        return {
+            ...existing,
+            ...provider,
+            href: hrefs[0],
+            hrefs: hrefs.length ? hrefs : undefined,
+            sourceCount: Math.max(existing?.sourceCount ?? 0, provider.sourceCount, hrefs.length),
         }
     }
 
@@ -312,6 +375,10 @@ export class LiveEventService {
 
     private normalizeToken(value: string): string {
         return this.slug(value) || 'live'
+    }
+
+    private unique(values: Array<string | undefined>): string[] {
+        return Array.from(new Set(values.filter((value): value is string => Boolean(value))))
     }
 
     private slug(value: string): string {
