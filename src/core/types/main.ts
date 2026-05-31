@@ -34,6 +34,8 @@ export interface CacheConfig {
     ttl?: {
         sources: number // seconds
         subtitles: number
+        liveManifest?: number
+        liveSources?: number
     }
 }
 
@@ -105,6 +107,8 @@ export interface HealthResponse {
         tv: string
         proxy: string
         refresh: string
+        liveEvents?: string
+        liveSources?: string
     }
     spec: 'omss'
     note?: string
@@ -133,6 +137,10 @@ export type ErrorCode =
     | 'METHOD_NOT_ALLOWED'
     | 'INTERNAL_ERROR'
     | 'UNSUPPORTED_MEDIA_TYPE'
+    | 'EVENT_NOT_FOUND'
+    | 'EVENT_NOT_LIVE'
+    | 'AUTH_REQUIRED'
+    | 'REGION_BLOCKED'
 
 // Provider Result
 export interface ProviderResult {
@@ -155,15 +163,16 @@ export interface ContentRequest {
 
 export interface ResponseIdMapping {
     cacheKey: string
-    type: 'movie' | 'tv'
-    tmdbId: string
+    type: 'movie' | 'tv' | 'live'
+    tmdbId?: string
     season?: number
     episode?: number
+    eventId?: string
     createdAt: number
 }
 
 export interface ProviderCapabilities {
-    supportedContentTypes: Array<'movies' | 'tv' | 'sub'>
+    supportedContentTypes: Array<'movies' | 'tv' | 'sub' | 'live'>
 }
 
 export interface ProviderMediaObject {
@@ -174,4 +183,57 @@ export interface ProviderMediaObject {
     releaseYear: string
     imdbId: string
     title: string
+}
+
+export type LiveEventStatus = 'scheduled' | 'live' | 'ended' | 'postponed'
+
+export interface LiveEventProviderRef {
+    providerId: string
+    internalEventId?: string
+    href?: string
+    lastChecked: string
+    sourceCount: number
+}
+
+export interface LiveEventManifest {
+    id: string
+    title: string
+    league: string
+    sport: string
+    startsAt: string
+    endsAt?: string
+    status: LiveEventStatus
+    teams?: {
+        home?: string
+        away?: string
+    }
+    region?: string
+    providers: LiveEventProviderRef[]
+}
+
+export interface ProviderLiveEventCandidate {
+    providerId: string
+    internalEventId?: string
+    title: string
+    league?: string
+    sport?: string
+    startsAt?: string
+    endsAt?: string
+    status?: LiveEventStatus
+    teams?: {
+        home?: string
+        away?: string
+    }
+    region?: string
+    href?: string
+    sourceCount?: number
+}
+
+export interface LiveSourceResponse extends SourceResponse {
+    event: LiveEventManifest
+}
+
+export interface LiveProvider {
+    getLiveEvents?(): Promise<ProviderLiveEventCandidate[]>
+    getLiveEventSources(event: LiveEventManifest): Promise<ProviderResult>
 }
