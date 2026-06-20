@@ -1,5 +1,27 @@
 <div align="center">
 
+# [~OMSS Framework~ MOVED](https://github.com/omss-spec/core)
+
+[![NPM Version](https://img.shields.io/npm/v/@omss/framework.svg)](https://www.npmjs.com/package/@omss/framework)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.3+-blue.svg)](https://www.typescriptlang.org/)
+[![OMSS Spec](https://img.shields.io/badge/OMSS-v1.0.0-orange.svg)](https://github.com/omss-spec/omss-spec)
+[![Node.js](https://img.shields.io/badge/Node.js-20.6+-green.svg)](https://nodejs.org/)
+
+</div>
+
+> [!CAUTION]
+> We are writing this whole thing new. If you are looking to implement OMSS v1, you can still use this framework.
+> 
+> Starting OMSS v1.1 and future releases will be moved to: https://github.com/omss-spec/core
+> The whole structure/usage will be different. Please bear with us while we are migrating. 
+
+---
+
+<details><summary>Click me to read the old readme.</summary>
+
+<div align="center">
+
 # OMSS Framework
 
 [![NPM Version](https://img.shields.io/npm/v/@omss/framework.svg)](https://www.npmjs.com/package/@omss/framework)
@@ -645,6 +667,8 @@ This implementation follows the [OMSS Standard](https://github.com/omss-spec/oms
 ## 🤝 Contributing
 
 Contributions are welcome! Please read [our contributing guidelines](https://github.com/omss-spec/omss-spec/blob/main/CONTRIBUTING.md) before submitting PRs.
+
+</details>
 
 ## 📄 License
 
