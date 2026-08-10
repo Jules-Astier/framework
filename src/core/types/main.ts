@@ -145,6 +145,7 @@ export interface ProviderResult {
 export interface ProxyData {
     url: string
     headers?: Record<string, string>
+    responseTransform?: 'strip-png-ts-prefix'
 }
 
 export interface ContentRequest {

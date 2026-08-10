@@ -164,10 +164,15 @@ export class ProxyService {
      * Handle buffered request for small files
      */
     private async handleBufferedRequest(proxyData: ProxyData): Promise<ProxyResponse> {
+        const requestHeaders = { ...(proxyData.headers ?? {}) }
+        if (proxyData.responseTransform === 'strip-png-ts-prefix') {
+            delete requestHeaders.range
+            delete requestHeaders.Range
+        }
         const response = await this.fetchWithTimeout(proxyData.url, {
             method: 'GET',
             headers: {
-                ...(proxyData.headers ?? {}),
+                ...requestHeaders,
                 'User-Agent': proxyData.headers?.['User-Agent'] ?? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.6912.95 Safari/537.36',
             },
         })
@@ -178,12 +183,16 @@ export class ProxyService {
 
         const contentType = response.headers.get('content-type') ?? ''
 
-        let responseData = Buffer.from(await response.arrayBuffer())
+        let responseData: Buffer = Buffer.from(await response.arrayBuffer())
+        let responseContentType = contentType || this.getMimeType(proxyData.url)
 
         if (this.isManifestFile(contentType, proxyData.url)) {
             const manifestContent = responseData.toString('utf-8')
-            const rewrittenContent = this.rewriteManifest(manifestContent, proxyData.url, proxyData.headers)
+            const rewrittenContent = this.rewriteManifest(manifestContent, proxyData.url, proxyData.headers, proxyData.responseTransform)
             responseData = Buffer.from(rewrittenContent, 'utf-8')
+        } else if (proxyData.responseTransform === 'strip-png-ts-prefix') {
+            responseData = this.stripPngTsPrefix(responseData)
+            responseContentType = 'video/mp2t'
         }
 
         const headersOut: Record<string, string> = {
@@ -192,19 +201,16 @@ export class ProxyService {
             'Cache-Control': response.headers.get('cache-control') ?? 'public, max-age=7200',
         }
 
-        const contentLength = response.headers.get('content-length')
-        if (contentLength) {
-            headersOut['Content-Length'] = contentLength
-        }
+        headersOut['Content-Length'] = String(responseData.length)
         const contentRange = response.headers.get('content-range')
-        if (contentRange) {
+        if (contentRange && proxyData.responseTransform === undefined) {
             headersOut['Content-Range'] = contentRange
         }
 
         return {
             data: responseData,
-            contentType: contentType || this.getMimeType(proxyData.url),
-            statusCode: response.status,
+            contentType: responseContentType,
+            statusCode: proxyData.responseTransform === 'strip-png-ts-prefix' ? 200 : response.status,
             headers: headersOut,
         }
     }
@@ -238,6 +244,9 @@ export class ProxyService {
             if (!data.url) {
                 throw new Error('Missing url field in proxy data')
             }
+            if (data.responseTransform !== undefined && data.responseTransform !== 'strip-png-ts-prefix') {
+                throw new Error('Unsupported response transform')
+            }
 
             return data
         } catch (error) {
@@ -265,7 +274,7 @@ export class ProxyService {
     /**
      * Rewrite manifest file URLs to go through proxy
      */
-    private rewriteManifest(content: string, baseUrl: string, headers?: Record<string, string>): string {
+    private rewriteManifest(content: string, baseUrl: string, headers?: Record<string, string>, responseTransform?: ProxyData['responseTransform']): string {
         const lines = content.split('\n')
         const rewrittenLines: string[] = []
 
@@ -284,7 +293,9 @@ export class ProxyService {
 
             if (this.isUrlLine(trimmedLine)) {
                 const resolvedUrl = this.resolveUrl(baseUrl, trimmedLine)
-                const proxiedUrl = this.createProxyUrl(resolvedUrl, headers)
+                const proxiedUrl = this.createProxyUrl(resolvedUrl, headers, {
+                    responseTransform,
+                })
 
                 const indent = line.match(/^\s*/)?.[0] ?? ''
                 rewrittenLines.push(indent + proxiedUrl)
@@ -370,8 +381,22 @@ export class ProxyService {
      * Create a proxy URL for a given upstream URL
      * ALWAYS includes headers from the original request
      */
-    public createProxyUrl(url: string, headers?: Record<string, string>): string {
-        const data = JSON.stringify({ url, headers })
+    public createProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform'>): string {
+        const data = JSON.stringify({ url, headers, ...options })
         return `/v1/proxy?data=${encodeURIComponent(data)}`
+    }
+
+    private stripPngTsPrefix(data: Buffer): Buffer {
+        const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        const prefixLength = 70
+        const secondPacketOffset = prefixLength + 188
+
+        if (data.length <= secondPacketOffset || !data.subarray(0, pngSignature.length).equals(pngSignature) || data[prefixLength] !== 0x47 || data[secondPacketOffset] !== 0x47) {
+            throw new OMSSError('INTERNAL_ERROR', 'Upstream segment normalization failed', 502, {
+                reason: 'invalid_png_ts_wrapper',
+            })
+        }
+
+        return data.subarray(prefixLength)
     }
 }

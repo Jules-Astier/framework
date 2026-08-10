@@ -211,9 +211,9 @@ export class SourceService {
         }
     }
 
-    private async validateSourceUrl(proxyData: ProxyData, timeoutMs = 3000): Promise<boolean> {
+    private async validateSourceUrl(proxyData: ProxyData, source: Source, timeoutMs: number): Promise<'valid' | 'invalid' | 'transient'> {
         if (process.env.INTERNAL_DEBUG === 'true') {
-            return true
+            return 'valid'
         }
 
         const controller = new AbortController()
@@ -226,14 +226,107 @@ export class SourceService {
                 signal: controller.signal,
             })
 
-            if (!res.ok) return false
-            await res.body?.cancel()
-            return true
+            if (res.status === 429 || res.status >= 500) {
+                await res.body?.cancel()
+                return 'transient'
+            }
+            if (!res.ok) {
+                await res.body?.cancel()
+                return 'invalid'
+            }
+            if (source.type !== 'hls') {
+                await res.body?.cancel()
+                return 'valid'
+            }
+            if (!res.body) return 'invalid'
+
+            const reader = res.body.getReader()
+            const chunks: Uint8Array[] = []
+            let length = 0
+            try {
+                while (length < 4096) {
+                    const { value, done } = await reader.read()
+                    if (done) break
+                    if (value) {
+                        chunks.push(value)
+                        length += value.length
+                    }
+                }
+            } finally {
+                await reader.cancel().catch(() => undefined)
+            }
+
+            const prefix = Buffer.concat(
+                chunks.map((chunk) => Buffer.from(chunk)),
+                length
+            )
+                .subarray(0, 4096)
+                .toString('utf8')
+                .trimStart()
+            return prefix.startsWith('#EXTM3U') ? 'valid' : 'invalid'
         } catch {
-            return false
+            return 'transient'
         } finally {
             clearTimeout(timeout)
         }
+    }
+
+    private validationSetting(name: string, fallback: number, min: number, max: number): number {
+        const parsed = Number.parseInt(process.env[name] ?? '', 10)
+        return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
+    }
+
+    private async validateProviderResults(results: ProviderResult[]): Promise<void> {
+        const tasks = results.flatMap((result, resultIndex) => result.sources.map((source, sourceIndex) => ({ resultIndex, sourceIndex, source })))
+        if (tasks.length === 0) return
+
+        const timeoutMs = this.validationSetting('SOURCE_VALIDATION_TIMEOUT_MS', 8000, 1000, 30000)
+        const concurrency = this.validationSetting('SOURCE_VALIDATION_CONCURRENCY', 4, 1, 16)
+        const outcomes = new Array<'valid' | 'invalid' | 'transient'>(tasks.length)
+        let cursor = 0
+
+        const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+            while (cursor < tasks.length) {
+                const taskIndex = cursor++
+                const task = tasks[taskIndex]
+                try {
+                    const data = new URL(task.source.url, 'http://localhost').searchParams.get('data')
+                    if (!data) {
+                        outcomes[taskIndex] = 'invalid'
+                        continue
+                    }
+                    outcomes[taskIndex] = await this.validateSourceUrl(ProxyService.decodeProxyData(data), task.source, timeoutMs)
+                } catch {
+                    outcomes[taskIndex] = 'invalid'
+                }
+            }
+        })
+        await Promise.all(workers)
+
+        results.forEach((result, resultIndex) => {
+            const original = result.sources
+            const providerTasks = tasks.map((task, taskIndex) => ({ task, outcome: outcomes[taskIndex] })).filter(({ task }) => task.resultIndex === resultIndex)
+            const dropped = new Set(providerTasks.filter(({ outcome }) => outcome === 'invalid').map(({ task }) => task.sourceIndex))
+            const transientCount = providerTasks.filter(({ outcome }) => outcome === 'transient').length
+            result.sources = original.filter((_, sourceIndex) => !dropped.has(sourceIndex))
+
+            if (dropped.size > 0) {
+                result.diagnostics.push({
+                    code: result.sources.length > 0 ? 'PARTIAL_SCRAPE' : 'PROVIDER_ERROR',
+                    message: `Source validation rejected ${dropped.size} of ${original.length} source(s)`,
+                    field: '',
+                    severity: result.sources.length > 0 ? 'warning' : 'error',
+                })
+            }
+            if (transientCount > 0) {
+                result.diagnostics.push({
+                    code: 'PARTIAL_SCRAPE',
+                    message: `Source validation retained ${transientCount} source(s) after a transient upstream failure`,
+                    field: '',
+                    severity: 'warning',
+                })
+            }
+        })
     }
 
     /**
@@ -263,32 +356,6 @@ export class SourceService {
                     result = await provider.getTVSources(media)
                 }
 
-                if (process.env.NODE_ENV?.toLowerCase() !== 'test') {
-                    // lightweight parallel validation
-                    const validatedSources = await Promise.allSettled(
-                        result.sources.map(async (source) => {
-                            try {
-                                const urlObj = new URL(source.url)
-                                const data = urlObj.searchParams.get('data')
-                                if (!data) return null
-
-                                const proxyData = ProxyService.decodeProxyData(data)
-
-                                const isValid = await this.validateSourceUrl(proxyData)
-
-                                return isValid ? source : null
-                            } catch {
-                                return null
-                            }
-                        })
-                    )
-
-                    result.sources = validatedSources
-                        .filter((r): r is PromiseFulfilledResult<Source | null> => r.status === 'fulfilled')
-                        .map((r) => r.value)
-                        .filter(Boolean) as typeof result.sources
-                }
-
                 const duration = Date.now() - startTime
                 console.log(`[SourceService] Provider '${provider.name}' returned ${result.sources.length} source(s) in ${duration}ms`)
 
@@ -313,7 +380,13 @@ export class SourceService {
 
         const results = await Promise.allSettled(promises)
 
-        return results.filter((r): r is PromiseFulfilledResult<ProviderResult> => r.status === 'fulfilled').map((r) => r.value)
+        const fulfilled = results.filter((r): r is PromiseFulfilledResult<ProviderResult> => r.status === 'fulfilled').map((r) => r.value)
+
+        if (process.env.NODE_ENV?.toLowerCase() !== 'test') {
+            await this.validateProviderResults(fulfilled)
+        }
+
+        return fulfilled
     }
 
     /**
