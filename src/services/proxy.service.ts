@@ -186,7 +186,8 @@ export class ProxyService {
         let responseData: Buffer = Buffer.from(await response.arrayBuffer())
         let responseContentType = contentType || this.getMimeType(proxyData.url)
 
-        if (this.isManifestFile(contentType, proxyData.url)) {
+        if (this.isManifestFile(responseData, proxyData.url)) {
+            responseContentType = 'application/vnd.apple.mpegurl'
             const manifestContent = responseData.toString('utf-8')
             const rewrittenContent = this.rewriteManifest(manifestContent, proxyData.url, proxyData.headers, proxyData.responseTransform)
             responseData = Buffer.from(rewrittenContent, 'utf-8')
@@ -258,17 +259,13 @@ export class ProxyService {
     }
 
     /**
-     * Check if the response is a manifest file that needs rewriting.
-     * Makes sure that it is text based, but NOT a subtitle file.
+     * Only decode verified HLS text. Some CDNs label encrypted video chunks
+     * as text/html (even with .html paths); decoding those destroys bytes.
+     * Inspect the signature so extensionless or mislabeled playlists still work.
      */
-    private isManifestFile(contentType: string, url: string): boolean {
-        const TEXT_BASED_MIME_REGEX = /^(text\/.*|application\/(.*\+xml|.*\+json|json|xml|javascript|yaml|x-yaml|x-www-form-urlencoded))(;.*)?$/i
-        const isTextLike = TEXT_BASED_MIME_REGEX.test(contentType)
-
-        return (
-            (isTextLike || /application\/(vnd\.apple\.mpegurl|x-mpegurl|dash\+xml)/i.test(contentType) || /\.m3u8(\?.*)?$/.test(url) || /\.mpd(\?.*)?$/.test(url)) &&
-            !/\.(vtt|srt|ass|ssa|ttml)(\?.*)?$/i.test(url)
-        )
+    private isManifestFile(body: Buffer, url: string): boolean {
+        if (/\.(vtt|srt|ass|ssa|ttml)(\?.*)?$/i.test(url)) return false
+        return /^\uFEFF?\s*#EXTM3U(?:\r?\n|$)/.test(body.subarray(0, 256).toString('utf-8'))
     }
 
     /**
