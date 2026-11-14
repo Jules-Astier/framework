@@ -53,7 +53,9 @@ export class ProxyService {
         this.isProd ?? console.log(`[ProxyService] Proxying request to: ${proxyData.url}`)
 
         try {
-            if (this.shouldStream(proxyData.url)) {
+            // Byte transforms must run before streaming; CDN URL patterns can
+            // otherwise bypass segment normalization entirely.
+            if (proxyData.responseTransform === undefined && this.shouldStream(proxyData.url)) {
                 return await this.handleStreamingRequest(proxyData)
             }
 

@@ -263,6 +263,19 @@ describe('PNG-wrapped MPEG-TS normalization', () => {
         expect((fetch as any).mock.calls[0][1].headers.Range).toBeUndefined()
     })
 
+    it('normalizes segments even when their CDN matches a streaming pattern', async () => {
+        const body = wrappedSegment()
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(binaryResp(body)))
+        const proxy = new ProxyService([/tiktokcdn\.com/])
+
+        const result = (await proxy.proxyRequest(enc('https://p16-sg.tiktokcdn.com/obj/segment', { range: 'bytes=0-' }, 'strip-png-ts-prefix'))) as any
+
+        expect(isStreamingResponse(result)).toBe(false)
+        expect(result.data).toEqual(body.subarray(70))
+        expect(result.contentType).toBe('video/mp2t')
+        expect((fetch as any).mock.calls[0][1].headers.range).toBeUndefined()
+    })
+
     it('rejects payloads that do not match both wrapper signatures', async () => {
         const body = wrappedSegment()
         body[70 + 188] = 0
