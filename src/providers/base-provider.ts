@@ -212,7 +212,7 @@ export abstract class BaseProvider {
     /**
      * Helper: Create proxy URL with full server address
      */
-    public createProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform'>): string {
+    public createProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform' | 'preferredAudioLanguage'>): string {
         const cleanUrl = this.cleanThirdPartyProxy(url)
         const data = JSON.stringify({ url: cleanUrl, headers, ...options })
         const encodedData = encodeURIComponent(data)
@@ -224,7 +224,7 @@ export abstract class BaseProvider {
     /**
      * Helper: Create relative proxy URL (for same-origin requests)
      */
-    protected createRelativeProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform'>): string {
+    protected createRelativeProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform' | 'preferredAudioLanguage'>): string {
         const data = JSON.stringify({ url, headers, ...options })
         return `/v1/proxy?data=${encodeURIComponent(data)}`
     }
