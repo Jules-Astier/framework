@@ -28,6 +28,7 @@
     ],
     "scripts": {
         "build": "npm run clean && tsc && tsc-alias",
+        "prepare": "npm run build",
         "dev": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs watch examples/basic-server.ts",
         "clean": "npx rimraf dist",
         "format": "prettier --write \"src/**/*.ts\"",

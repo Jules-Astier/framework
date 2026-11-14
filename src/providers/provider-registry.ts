@@ -2,7 +2,7 @@ import { BaseProvider } from './base-provider.js'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { pathToFileURL } from 'url'
-import { OMSSConfig } from '../core/types/index.js'
+import { LiveProvider, OMSSConfig, ProviderLiveEventCandidate } from '../core/types/index.js'
 
 export interface ProviderRegistryConfig {
     proxyBaseUrl?: string
@@ -131,6 +131,22 @@ export class ProviderRegistry {
      */
     getEnabledProviders(): BaseProvider[] {
         return this.getProviders().filter((p) => p.enabled)
+    }
+
+    /**
+     * Get enabled providers that can resolve live event sources.
+     */
+    getLiveProviders(): Array<BaseProvider & LiveProvider> {
+        return this.getEnabledProviders()
+            .filter((p) => p.capabilities.supportedContentTypes.includes('live'))
+            .filter((p): p is BaseProvider & LiveProvider => typeof (p as unknown as LiveProvider).getLiveEventSources === 'function')
+    }
+
+    /**
+     * Get enabled live providers that can discover live event metadata.
+     */
+    getLiveDiscoveryProviders(): Array<BaseProvider & LiveProvider & { getLiveEvents: () => Promise<ProviderLiveEventCandidate[]> }> {
+        return this.getLiveProviders().filter((p): p is BaseProvider & LiveProvider & { getLiveEvents: () => Promise<ProviderLiveEventCandidate[]> } => typeof p.getLiveEvents === 'function')
     }
 
     /**

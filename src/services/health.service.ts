@@ -21,6 +21,8 @@ export class HealthService {
                 tv: '/v1/tv/{id}/seasons/{s}/episodes/{e}',
                 proxy: '/v1/proxy?data={encoded_data}',
                 refresh: '/v1/refresh/{responseId}',
+                liveEvents: '/v1/live/events',
+                liveSources: '/v1/live/events/{eventId}/sources',
             },
             spec: 'omss',
             note:
