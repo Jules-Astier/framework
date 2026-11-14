@@ -654,3 +654,29 @@ MIT License - see [LICENSE](./LICENSE) file for details.
 
 - All maintainers
 - OMSS standard contributors
+
+### Progressive source discovery
+
+Append `?stream=1` to the existing movie or TV-episode endpoint to receive
+`application/x-ndjson`. `start`, `update`, and `complete` events carry cumulative
+`response` snapshots (the usual `SourceResponse` shape), a stable `responseId`,
+and `completedProviders`/`totalProviders`. A terminal `error` has an `error`
+object. Append `refresh=1` to bypass cached results. Normal JSON calls keep their
+existing behavior.
+
+Validation begins as each provider returns sources. Direct sources become
+available individually after basic availability/format checks: HLS must be a
+playlist; MP4/WebM/MKV/transport media require recognizable binary headers; DASH
+must contain an MPD. These checks are not full codec or end-to-end playback
+certification. Transient failures and embed sources are not advertised as
+verified. Cached URLs are rechecked; stale cache data falls back to a fresh search.
+
+`SOURCE_VALIDATION_CONCURRENCY` defaults to four shared validation requests across
+searches, with round-robin provider groups. Slow clients receive coalesced newest
+snapshots rather than an unbounded event queue. `SOURCE_DISCOVERY_TIMEOUT_MS`
+defaults to 30 seconds (1–120 seconds) and includes metadata work. A deadline
+finishes with `complete` and `timedOut: true`, preserving verified partial sources
+without caching the incomplete search. Client disconnects abort queued/active
+validation and suppress late results. Existing provider methods do not expose
+abort signals, so their already-started extraction requests may run until their
+own timeout; the stream does not wait for or publish those late results.

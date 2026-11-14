@@ -37,7 +37,8 @@ export async function validateContentType(request: FastifyRequest, reply: Fastif
     const accept = request.headers['accept']
 
     // Check Accept header
-    if (accept && !accept.includes('application/json') && !accept.includes('*/*')) {
+    const streaming = (request.query as { stream?: string } | undefined)?.stream === '1'
+    if (accept && !accept.includes('application/json') && !accept.includes('*/*') && !(streaming && accept.includes('application/x-ndjson'))) {
         reply.code(406).send({
             error: {
                 code: 'UNSUPPORTED_MEDIA_TYPE',

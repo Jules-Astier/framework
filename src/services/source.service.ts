@@ -1,14 +1,17 @@
 import { ProviderRegistry } from '../providers/provider-registry.js'
 import { CacheService } from '../core/cache.js'
-import { SourceResponse, ProviderResult, ResponseIdMapping, ProviderMediaObject, Diagnostic, Subtitle, Source, ProxyData } from '../core/types/index.js'
+import { SourceResponse, ProviderResult, ResponseIdMapping, ProviderMediaObject, Diagnostic, Subtitle, Source, ProxyData, SourceDiscoveryEvent, SourceDiscoveryOptions } from '../core/types/index.js'
 import { createTMDBValidator } from '../middleware/validation.js'
 import { OMSSErrors } from '../core/errors.js'
 import { TMDBService } from '../services/tmdb.service.js'
 import { StremioService } from './stremio.service.js'
 import { ProxyService } from './proxy.service.js'
+import { SourceValidationQueue } from './source-validation-queue.js'
 
 export class SourceService {
+    private cleanupTimer: NodeJS.Timeout
     private tmdbValidator: ReturnType<typeof createTMDBValidator>
+    private validationQueue = new SourceValidationQueue(() => this.validationSetting('SOURCE_VALIDATION_CONCURRENCY', 4, 1, 16))
     private responseIdMap: Map<string, ResponseIdMapping> = new Map()
 
     constructor(
@@ -18,7 +21,8 @@ export class SourceService {
         private stremioService: StremioService,
         private cacheTTL = { sources: 7200, subtitles: 86400 }
     ) {
-        setInterval(() => this.cleanupExpiredMappings(), 60 * 60 * 1000)
+        this.cleanupTimer = setInterval(() => this.cleanupExpiredMappings(), 60 * 60 * 1000)
+        this.cleanupTimer.unref()
         this.tmdbValidator = createTMDBValidator(tmdbService)
     }
 
@@ -160,6 +164,187 @@ export class SourceService {
         return response
     }
 
+    discoveryTimeoutMs(): number {
+        return this.validationSetting('SOURCE_DISCOVERY_TIMEOUT_MS', 30000, 1000, 120000)
+    }
+
+    async streamMovieSources(tmdbId: string, emit: (event: SourceDiscoveryEvent) => Promise<void>, options: SourceDiscoveryOptions = {}): Promise<void> {
+        return this.streamSources('movie', tmdbId, undefined, undefined, emit, options)
+    }
+
+    async streamTVSources(tmdbId: string, season: number, episode: number, emit: (event: SourceDiscoveryEvent) => Promise<void>, options: SourceDiscoveryOptions = {}): Promise<void> {
+        return this.streamSources('tv', tmdbId, season, episode, emit, options)
+    }
+
+    private async streamSources(
+        type: 'movie' | 'tv',
+        tmdbId: string,
+        season: number | undefined,
+        episode: number | undefined,
+        emit: (event: SourceDiscoveryEvent) => Promise<void>,
+        options: SourceDiscoveryOptions
+    ): Promise<void> {
+        const controller = new AbortController(),
+            signal = controller.signal
+        let timedOut = false,
+            completedProviders = 0,
+            accepting = true
+        const timeoutMs = Math.min(120000, Math.max(1, options.timeoutMs ?? this.discoveryTimeoutMs()))
+        const timer = setTimeout(() => {
+            timedOut = true
+            controller.abort()
+        }, timeoutMs)
+        timer.unref()
+        const abort = () => controller.abort()
+        options.signal?.addEventListener('abort', abort, { once: true })
+        if (options.signal?.aborted) controller.abort()
+        const providers = this.registry.getProviders().filter((p) => p.enabled && p.capabilities.supportedContentTypes.includes(type === 'movie' ? 'movies' : 'tv'))
+        const addons = this.stremioService?.hasEnabledAddons()
+        const totalProviders = providers.length + (addons ? 1 : 0)
+        const responseId = crypto.randomUUID()
+        let expiresAt = new Date(Date.now() + this.cacheTTL.sources * 1000).toISOString()
+        const sources = new Map<string, Source>(),
+            subtitles = new Map<string, Subtitle>()
+        const diagnostics: Diagnostic[] = []
+        const cacheKey = type === 'movie' ? `movie:${tmdbId}` : `tv:${tmdbId}:s${season}:e${episode}`
+        let mappingStored = false
+        const ensureMapping = () => {
+            if (mappingStored) return
+            mappingStored = true
+            this.storeResponseIdMapping(responseId, { cacheKey, type, tmdbId, ...(type === 'tv' ? { season, episode } : {}), createdAt: Date.now() })
+        }
+        let pendingEvent: SourceDiscoveryEvent | undefined
+        let writer: Promise<void> | undefined
+        const snapshot = (): SourceResponse => ({ responseId, expiresAt, sources: [...sources.values()], subtitles: [...subtitles.values()], diagnostics: [...diagnostics] })
+        const event = (eventType: SourceDiscoveryEvent['type']): SourceDiscoveryEvent => ({
+            type: eventType,
+            response: snapshot(),
+            completedProviders,
+            totalProviders,
+            ...(timedOut ? { timedOut: true } : {}),
+        })
+        const bounded = <T>(operation: Promise<T>): Promise<T> =>
+            new Promise((resolve, reject) => {
+                const cancelled = () => reject(new DOMException('Source discovery was cancelled', 'AbortError'))
+                if (signal.aborted) {
+                    operation.catch(() => {})
+                    cancelled()
+                    return
+                }
+                signal.addEventListener('abort', cancelled, { once: true })
+                operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancelled))
+            })
+        const send = (value: SourceDiscoveryEvent): Promise<void> => {
+            // One write in flight and one newest cumulative snapshot: slow clients
+            // cannot accumulate a response-sized buffer for every discovered source.
+            pendingEvent = value
+            if (!writer) {
+                writer = Promise.resolve().then(async () => {
+                    try {
+                        while (pendingEvent && accepting && !signal.aborted) {
+                            const next = pendingEvent
+                            pendingEvent = undefined
+                            await emit(next)
+                        }
+                    } finally {
+                        writer = undefined
+                    }
+                })
+            }
+            return bounded(writer)
+        }
+        const addResult = async (result: ProviderResult, group: string): Promise<void> => {
+            if (!accepting || signal.aborted) return
+            diagnostics.push(...(result.diagnostics ?? []))
+            for (const subtitle of result.subtitles ?? []) subtitles.set(subtitle.url, subtitle)
+            await Promise.allSettled(
+                result.sources
+                    .filter((source) => source.type !== 'embed')
+                    .map(async (source) => {
+                        if (signal.aborted) return
+                        let proxyData: ProxyData
+                        try {
+                            const data = new URL(source.url, 'http://localhost').searchParams.get('data')
+                            if (!data) return
+                            proxyData = ProxyService.decodeProxyData(data)
+                        } catch {
+                            return
+                        }
+                        const outcome = await this.validationQueue.run(
+                            `${responseId}:${group}`,
+                            () => this.validateSourceUrl(proxyData, source, this.validationSetting('SOURCE_VALIDATION_TIMEOUT_MS', 8000, 1000, 30000), signal, true),
+                            signal
+                        )
+                        if (outcome !== 'valid' || signal.aborted || !accepting) return
+                        // Request context (especially audio preference) is part of playable identity.
+                        const key = JSON.stringify([proxyData.url, proxyData.headers ?? {}, proxyData.preferredAudioLanguage ?? '', proxyData.responseTransform ?? ''])
+                        if (sources.has(key)) return
+                        sources.set(key, source)
+                        ensureMapping()
+                        await send(event('update'))
+                    })
+            )
+        }
+        try {
+            await send(event('start'))
+            if (type === 'movie') await bounded(this.tmdbValidator.validateMovie(tmdbId))
+            else await bounded(this.tmdbValidator.validateTVEpisode(tmdbId, season!, episode!))
+            const cached = options.refresh ? null : await bounded(this.cache.get<SourceResponse>(cacheKey))
+            if (cached) {
+                if (Number.isFinite(Date.parse(cached.expiresAt)) && Date.parse(cached.expiresAt) > Date.now()) {
+                    expiresAt = cached.expiresAt
+                    await bounded(addResult(cached, 'cache'))
+                    if (sources.size) {
+                        completedProviders = totalProviders
+                        ensureMapping()
+                        await send(event('complete'))
+                        return
+                    }
+                }
+                // Expired/signed links cannot keep an otherwise cacheable title empty.
+                subtitles.clear()
+                diagnostics.length = 0
+                await bounded(this.cache.delete(cacheKey))
+            }
+            expiresAt = new Date(Date.now() + this.cacheTTL.sources * 1000).toISOString()
+            const media = await bounded(this.tmdbService.getMediaObject(type, tmdbId, season, episode))
+            media.imdbId = (await bounded(this.tmdbService.getImdbId(tmdbId, type))) ?? ''
+            const run = async (group: string, task: () => Promise<ProviderResult>) => {
+                try {
+                    const result = await task()
+                    if (signal.aborted || !accepting) return
+                    await addResult(result, group)
+                } catch {
+                    if (!signal.aborted && accepting) diagnostics.push({ code: 'PROVIDER_ERROR', message: `Provider ${group} failed to resolve sources`, field: '', severity: 'warning' })
+                } finally {
+                    if (!signal.aborted && accepting) {
+                        completedProviders++
+                        await send(event('update'))
+                    }
+                }
+            }
+            const tasks = providers.map((provider) => run(provider.id, () => (type === 'movie' ? provider.getMovieSources(media) : provider.getTVSources(media))))
+            if (addons) tasks.push(run('stremio', () => (type === 'movie' ? this.stremioService.getMovieSources(media) : this.stremioService.getTVSources(media))))
+            await bounded(Promise.allSettled(tasks))
+            if (!signal.aborted && sources.size) {
+                const response = snapshot()
+                ensureMapping()
+                await bounded(this.cache.set(cacheKey, response, this.cacheTTL.sources))
+            }
+            await send(event('complete'))
+        } catch (error) {
+            if (!timedOut) throw error
+            // A deadline ends this search, but keeps already verified partial results usable.
+            accepting = false
+            if (!options.signal?.aborted) await emit(event('complete'))
+        } finally {
+            accepting = false
+            clearTimeout(timer)
+            controller.abort()
+            options.signal?.removeEventListener('abort', abort)
+        }
+    }
+
     /**
      * Refresh cached sources by responseId
      */
@@ -211,12 +396,15 @@ export class SourceService {
         }
     }
 
-    private async validateSourceUrl(proxyData: ProxyData, source: Source, timeoutMs: number): Promise<'valid' | 'invalid' | 'transient'> {
-        if (process.env.INTERNAL_DEBUG === 'true') {
+    private async validateSourceUrl(proxyData: ProxyData, source: Source, timeoutMs: number, signal?: AbortSignal, strict = false): Promise<'valid' | 'invalid' | 'transient'> {
+        if (!strict && process.env.INTERNAL_DEBUG === 'true') {
             return 'valid'
         }
 
         const controller = new AbortController()
+        const abort = () => controller.abort()
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) controller.abort()
         const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
         try {
@@ -234,7 +422,7 @@ export class SourceService {
                 await res.body?.cancel()
                 return 'invalid'
             }
-            if (source.type !== 'hls') {
+            if (!strict && source.type !== 'hls') {
                 await res.body?.cancel()
                 return 'valid'
             }
@@ -250,24 +438,33 @@ export class SourceService {
                     if (value) {
                         chunks.push(value)
                         length += value.length
+                        if (strict && source.type !== 'hls' && source.type !== 'dash' && length >= 16) break
                     }
                 }
             } finally {
                 await reader.cancel().catch(() => undefined)
             }
 
-            const prefix = Buffer.concat(
+            const bytes = Buffer.concat(
                 chunks.map((chunk) => Buffer.from(chunk)),
                 length
-            )
-                .subarray(0, 4096)
-                .toString('utf8')
-                .trimStart()
-            return prefix.startsWith('#EXTM3U') ? 'valid' : 'invalid'
+            ).subarray(0, 4096)
+            const prefix = bytes.toString('utf8').trimStart()
+            if (source.type === 'hls') return prefix.startsWith('#EXTM3U') ? 'valid' : 'invalid'
+            if (source.type === 'dash') return /^(?:<\?xml[^>]*>\s*)?<(?:[A-Za-z0-9_]+:)?MPD(?:\s|>)/.test(prefix) ? 'valid' : 'invalid'
+            // A 200 HTML/JSON error document must never become the first advertised video.
+            if (/^(?:[<{\[]|#EXTM3U)/.test(prefix)) return 'invalid'
+            const atom = bytes.subarray(4, 8).toString('ascii')
+            const isoMedia = bytes.length >= 12 && ['ftyp', 'moov', 'mdat', 'free', 'wide', 'styp', 'moof'].includes(atom)
+            const ebml = bytes.length >= 8 && bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+            const transport = bytes.length >= 188 && bytes[0] === 0x47 && (bytes.length < 376 || bytes[188] === 0x47)
+            const program = bytes.length >= 8 && bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0xba
+            return isoMedia || ebml || transport || program ? 'valid' : 'invalid'
         } catch {
             return 'transient'
         } finally {
             clearTimeout(timeout)
+            signal?.removeEventListener('abort', abort)
         }
     }
 
@@ -295,7 +492,7 @@ export class SourceService {
                         outcomes[taskIndex] = 'invalid'
                         continue
                     }
-                    outcomes[taskIndex] = await this.validateSourceUrl(ProxyService.decodeProxyData(data), task.source, timeoutMs)
+                    outcomes[taskIndex] = await this.validationQueue.run('legacy:' + task.resultIndex, () => this.validateSourceUrl(ProxyService.decodeProxyData(data), task.source, timeoutMs))
                 } catch {
                     outcomes[taskIndex] = 'invalid'
                 }
@@ -487,6 +684,7 @@ export class SourceService {
      * Cleanup on service shutdown
      */
     destroy(): void {
+        clearInterval(this.cleanupTimer)
         this.responseIdMap.clear()
         console.log('[SourceService] Destroyed and cleared all mappings')
     }
