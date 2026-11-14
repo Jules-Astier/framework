@@ -7,9 +7,11 @@ import { SourceService } from '../services/source.service.js'
 import { ProxyService } from '../services/proxy.service.js'
 import { HealthService } from '../services/health.service.js'
 import { StremioService } from '../services/stremio.service.js'
+import { LiveEventService } from '../services/live-event.service.js'
 import { ContentController } from '../controllers/content.controller.js'
 import { ProxyController } from '../controllers/proxy.controller.js'
 import { HealthController } from '../controllers/health.controller.js'
+import { LiveController } from '../controllers/live.controller.js'
 import { errorHandler } from '../middleware/error-handler.js'
 import { requestLogger } from '../middleware/logger.js'
 import { validateContentType } from '../middleware/validation.js'
@@ -29,11 +31,13 @@ export class OMSSServer {
     private healthService: HealthService
     private tmdbService: TMDBService
     private stremioService: StremioService
+    private liveEventService: LiveEventService
 
     // Controllers
     private contentController: ContentController
     private proxyController: ProxyController
     private healthController: HealthController
+    private liveController: LiveController
     private stremioController?: StremioController
     private mcpController?: MCPController
 
@@ -90,12 +94,17 @@ export class OMSSServer {
         this.proxyService = new ProxyService(config.proxyConfig?.streamPatterns || [])
         this.stremioService = new StremioService(config.stremio?.stremioAddons || [], this.proxyService)
         this.sourceService = new SourceService(this.registry, this.cache, this.tmdbService, this.stremioService, config.cache?.ttl)
+        this.liveEventService = new LiveEventService(this.registry, this.cache, {
+            manifest: config.cache?.ttl?.liveManifest ?? 6 * 60 * 60,
+            sources: config.cache?.ttl?.liveSources ?? 30,
+        })
         this.healthService = new HealthService(config, this.registry)
 
         // Initialize controllers
         this.contentController = new ContentController(this.sourceService)
         this.proxyController = new ProxyController(this.proxyService)
         this.healthController = new HealthController(this.healthService)
+        this.liveController = new LiveController(this.liveEventService)
 
         if (config.stremio?.enableNativeAddon) {
             this.stremioController = new StremioController(this.sourceService, config, this.tmdbService)
@@ -147,6 +156,9 @@ export class OMSSServer {
         // Content endpoints
         this.app.get('/v1/movies/:id', this.contentController.getMovie.bind(this.contentController))
         this.app.get('/v1/tv/:id/seasons/:s/episodes/:e', this.contentController.getTVEpisode.bind(this.contentController))
+        this.app.get('/v1/live/events', this.liveController.listEvents.bind(this.liveController))
+        this.app.get('/v1/live/events/:eventId', this.liveController.getEvent.bind(this.liveController))
+        this.app.get('/v1/live/events/:eventId/sources', this.liveController.getEventSources.bind(this.liveController))
 
         // Refresh endpoint
         this.app.get('/v1/refresh/:responseId', this.contentController.refreshSource.bind(this.contentController))
@@ -221,6 +233,9 @@ export class OMSSServer {
 ║    GET  /v1/movies/:id           - Movie sources       ║
 ║    GET  /v1/tv/:id/seasons/:s/episodes/:e              ║
 ║                                  - TV sources          ║
+║    GET  /v1/live/events          - Live event manifest ║
+║    GET  /v1/live/events/:eventId/sources               ║
+║                                  - Live event sources  ║
 ║    GET  /v1/proxy?data=...       - Proxy endpoint      ║
 ║    GET  /v1/refresh/:responseId  - Refresh cache       ║`)
 

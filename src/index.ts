@@ -19,6 +19,7 @@ export { ProviderRegistry, type ProviderRegistryConfig } from './providers/provi
 export { SourceService } from './services/source.service.js'
 export { ProxyService } from './services/proxy.service.js'
 export { HealthService } from './services/health.service.js'
+export { LiveEventService, type LiveEventCacheTTL, type LiveEventListOptions, type LiveEventSourceOptions } from './services/live-event.service.js'
 
 // Utility exports
 export { ProxyService as ProxyUtils } from './services/proxy.service.js'

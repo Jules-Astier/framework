@@ -55,5 +55,30 @@ export const OMSSErrors = {
 
     responseIdNotFound: (responseId: string) => new OMSSError('RESPONSE_ID_NOT_FOUND', 'ResponseId not found or already refreshed', 404, { parameter: 'responseId', value: responseId }),
 
+    eventNotFound: (eventId: string) =>
+        new OMSSError('EVENT_NOT_FOUND', `Live event not found: ${eventId}`, 404, {
+            parameter: 'eventId',
+            value: eventId,
+        }),
+
+    eventNotLive: (eventId: string, status?: string) =>
+        new OMSSError('EVENT_NOT_LIVE', `Live event is not currently playable: ${eventId}`, 409, {
+            parameter: 'eventId',
+            value: eventId,
+            status,
+        }),
+
+    authRequired: (providerId?: string) =>
+        new OMSSError('AUTH_REQUIRED', 'Provider authentication is required for this live source', 401, {
+            providerId,
+        }),
+
+    regionBlocked: (eventId: string, region?: string) =>
+        new OMSSError('REGION_BLOCKED', `Live event is blocked in this region: ${eventId}`, 451, {
+            parameter: 'eventId',
+            value: eventId,
+            region,
+        }),
+
     internalError: (message: string) => new OMSSError('INTERNAL_ERROR', message, 500),
 }
