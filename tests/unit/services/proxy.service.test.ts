@@ -240,11 +240,11 @@ describe('buffered m3u8 rewriting', () => {
 })
 
 describe('PNG-wrapped MPEG-TS normalization', () => {
-    function wrappedSegment(): Buffer {
-        const body = Buffer.alloc(70 + 188 * 2, 0)
+    function wrappedSegment(prefixLength = 70): Buffer {
+        const body = Buffer.alloc(prefixLength + 188 * 2, 0)
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(body)
-        body[70] = 0x47
-        body[70 + 188] = 0x47
+        body[prefixLength] = 0x47
+        body[prefixLength + 188] = 0x47
         return body
     }
 
@@ -261,6 +261,19 @@ describe('PNG-wrapped MPEG-TS normalization', () => {
         expect(result.data[188]).toBe(0x47)
         expect(result.headers['Content-Length']).toBe(String(body.length - 70))
         expect((fetch as any).mock.calls[0][1].headers.Range).toBeUndefined()
+    })
+
+    it('normalizes the verified 64-byte wrapper used by Vercetti', async () => {
+        const body = wrappedSegment(64)
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(binaryResp(body)))
+        const result = (await new ProxyService().proxyRequest(enc('https://vercetti.org/segment', undefined, 'strip-png-ts-prefix'))) as any
+        expect(result.data).toEqual(body.subarray(64))
+        expect(result.contentType).toBe('video/mp2t')
+    })
+
+    it('rejects an unverified prefix offset even when transport sync bytes exist', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(binaryResp(wrappedSegment(80))))
+        await expect(new ProxyService().proxyRequest(enc('https://cdn.example.com/segment', undefined, 'strip-png-ts-prefix'))).rejects.toMatchObject({ statusCode: 502 })
     })
 
     it('normalizes segments even when their CDN matches a streaming pattern', async () => {

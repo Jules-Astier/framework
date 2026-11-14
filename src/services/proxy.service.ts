@@ -387,15 +387,16 @@ export class ProxyService {
 
     private stripPngTsPrefix(data: Buffer): Buffer {
         const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-        const prefixLength = 70
-        const secondPacketOffset = prefixLength + 188
-
-        if (data.length <= secondPacketOffset || !data.subarray(0, pngSignature.length).equals(pngSignature) || data[prefixLength] !== 0x47 || data[secondPacketOffset] !== 0x47) {
-            throw new OMSSError('INTERNAL_ERROR', 'Upstream segment normalization failed', 502, {
-                reason: 'invalid_png_ts_wrapper',
-            })
+        if (data.subarray(0, pngSignature.length).equals(pngSignature)) {
+            // Verified CDN variants use either a 70-byte or 64-byte PNG prefix.
+            // Accept only these layouts with consecutive MPEG-TS sync bytes.
+            for (const prefixLength of [70, 64]) {
+                const secondPacketOffset = prefixLength + 188
+                if (data.length > secondPacketOffset && data[prefixLength] === 0x47 && data[secondPacketOffset] === 0x47) return data.subarray(prefixLength)
+            }
         }
-
-        return data.subarray(prefixLength)
+        throw new OMSSError('INTERNAL_ERROR', 'Upstream segment normalization failed', 502, {
+            reason: 'invalid_png_ts_wrapper',
+        })
     }
 }
