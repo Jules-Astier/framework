@@ -164,6 +164,34 @@ describe('ProxyService streaming path', () => {
 })
 
 describe('buffered m3u8 rewriting', () => {
+    it.each(['text/html', 'text/plain', 'application/x-mpegURL'])('preserves binary segments mislabeled as %s', async (contentType) => {
+        const segment = Buffer.from([0x04, 0x2e, 0x4d, 0x90, 0xff, 0x00, 0xfd, 0x52])
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(binaryResp(segment, contentType)))
+
+        const result = (await new ProxyService().proxyRequest(enc('https://cdn.example.com/video/0001.html?token=sample'))) as any
+
+        expect(result.data).toEqual(segment)
+        expect(result.headers['Content-Length']).toBe(String(segment.length))
+    })
+
+    it.each(['text/html', 'application/octet-stream'])('rewrites extensionless playlists served as %s', async (contentType) => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(bufResp('#EXTM3U\nseg0.ts\n', contentType)))
+
+        const result = (await new ProxyService().proxyRequest(enc('https://cdn.example.com/playlist/123'))) as any
+
+        expect(result.data.toString()).toContain('/v1/proxy?data=')
+        expect(result.data.toString()).toContain('seg0.ts')
+        expect(result.contentType).toBe('application/vnd.apple.mpegurl')
+    })
+
+    it('leaves HTML errors untouched instead of rewriting them as playlists', async () => {
+        const html = '<html>Unavailable</html>'
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(bufResp(html, 'text/html', 403)))
+        const result = (await new ProxyService().proxyRequest(enc('https://cdn.example.com/playlist'))) as any
+        expect(result.data.toString()).toBe(html)
+        expect(result.statusCode).toBe(403)
+    })
+
     it('rewrites absolute URLs', async () => {
         const manifest = ['#EXTM3U', 'https://cdn.example.com/seg0.ts', 'https://cdn.example.com/seg1.ts'].join('\n')
 
