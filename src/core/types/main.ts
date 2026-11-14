@@ -60,6 +60,21 @@ export interface SourceResponse {
     diagnostics: Diagnostic[]
 }
 
+/** Cumulative snapshots containing only sources that passed this request's checks. */
+export interface SourceDiscoveryEvent {
+    type: 'start' | 'update' | 'complete' | 'error'
+    response?: SourceResponse
+    completedProviders?: number
+    totalProviders?: number
+    timedOut?: boolean
+    error?: { code: string; message: string }
+}
+export interface SourceDiscoveryOptions {
+    signal?: AbortSignal
+    refresh?: boolean
+    timeoutMs?: number
+}
+
 export interface Source {
     url: string
     type: SourceType
