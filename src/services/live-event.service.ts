@@ -140,7 +140,10 @@ export class LiveEventService {
     private async enrichEvents(events: LiveEventManifest[], checkedAt: string): Promise<LiveEventManifest[]> {
         const matchers = this.registry
             .getLiveProviders()
-            .filter((provider): provider is BaseProvider & LiveProvider & { matchLiveEvent: (event: LiveEventManifest) => Promise<ProviderLiveEventCandidate | undefined> } => typeof provider.matchLiveEvent === 'function')
+            .filter(
+                (provider): provider is BaseProvider & LiveProvider & { matchLiveEvent: (event: LiveEventManifest) => Promise<ProviderLiveEventCandidate | undefined> } =>
+                    typeof provider.matchLiveEvent === 'function'
+            )
 
         if (!matchers.length) {
             return events
