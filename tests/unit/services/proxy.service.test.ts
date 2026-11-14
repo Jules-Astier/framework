@@ -342,3 +342,21 @@ describe('decodeProxyData errors', () => {
         ).toThrow()
     })
 })
+
+
+describe('preferred language proxy boundary', () => {
+    it('rewrites audio defaults and propagates the preference through child playlists', async () => {
+        const manifest = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="en.m3u8"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="French [Original] stereo",LANGUAGE="fr",DEFAULT=NO,URI="fr.m3u8"\nvideo.m3u8\n'
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(bufResp(manifest, 'application/x-mpegURL')))
+        const payload = encodeURIComponent(JSON.stringify({ url: 'https://cdn.example.com/master.m3u8', preferredAudioLanguage: 'fr' }))
+        const result = await new ProxyService([/cdn\.example/]).proxyRequest(payload) as any
+        const text = result.data.toString()
+        expect(text.split('\n')[1]).toContain('DEFAULT=NO')
+        expect(text.split('\n')[2]).toContain('DEFAULT=YES')
+        const child = text.split('\n').find((line: string) => line.startsWith('/v1/proxy'))
+        expect(ProxyService.decodeProxyData(new URL(child, 'http://localhost').searchParams.get('data')!).preferredAudioLanguage).toBe('fr')
+    })
+    it('rejects malformed language values', () => {
+        for (const preferredAudioLanguage of [42, null, 'fr\r\nCookie:x', '']) expect(() => ProxyService.decodeProxyData(encodeURIComponent(JSON.stringify({ url: 'https://cdn.example/master.m3u8', preferredAudioLanguage })))).toThrow()
+    })
+})

@@ -1,3 +1,4 @@
+import { preferHlsAudioLanguage } from './hls-audio.js'
 import { Readable } from 'stream'
 import { ProxyData } from '../core/types/index.js'
 import { OMSSError } from '../core/errors.js'
@@ -55,7 +56,7 @@ export class ProxyService {
         try {
             // Byte transforms must run before streaming; CDN URL patterns can
             // otherwise bypass segment normalization entirely.
-            if (proxyData.responseTransform === undefined && this.shouldStream(proxyData.url)) {
+            if (proxyData.responseTransform === undefined && proxyData.preferredAudioLanguage === undefined && this.shouldStream(proxyData.url)) {
                 return await this.handleStreamingRequest(proxyData)
             }
 
@@ -191,7 +192,7 @@ export class ProxyService {
         if (this.isManifestFile(responseData, proxyData.url)) {
             responseContentType = 'application/vnd.apple.mpegurl'
             const manifestContent = responseData.toString('utf-8')
-            const rewrittenContent = this.rewriteManifest(manifestContent, proxyData.url, proxyData.headers, proxyData.responseTransform)
+            const rewrittenContent = this.rewriteManifest(manifestContent, proxyData.url, proxyData.headers, proxyData.responseTransform, proxyData.preferredAudioLanguage)
             responseData = Buffer.from(rewrittenContent, 'utf-8')
         } else if (proxyData.responseTransform === 'strip-png-ts-prefix') {
             responseData = this.stripPngTsPrefix(responseData)
@@ -251,6 +252,12 @@ export class ProxyService {
                 throw new Error('Unsupported response transform')
             }
 
+            if (
+                data.preferredAudioLanguage !== undefined &&
+                (typeof data.preferredAudioLanguage !== 'string' || data.preferredAudioLanguage.length > 35 || !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(data.preferredAudioLanguage))
+            )
+                throw new Error('Invalid preferred audio language')
+
             return data
         } catch (error) {
             throw new OMSSError('INVALID_PARAMETER', 'Invalid data parameter format', 400, {
@@ -273,15 +280,15 @@ export class ProxyService {
     /**
      * Rewrite manifest file URLs to go through proxy
      */
-    private rewriteManifest(content: string, baseUrl: string, headers?: Record<string, string>, responseTransform?: ProxyData['responseTransform']): string {
-        const lines = content.split('\n')
+    private rewriteManifest(content: string, baseUrl: string, headers?: Record<string, string>, responseTransform?: ProxyData['responseTransform'], preferredAudioLanguage?: string): string {
+        const lines = preferHlsAudioLanguage(content, preferredAudioLanguage).split('\n')
         const rewrittenLines: string[] = []
 
         for (const line of lines) {
             const trimmedLine = line.trim()
 
             if (line.startsWith('#') && this.hasUriAttribute(line)) {
-                rewrittenLines.push(this.rewriteTagAttributes(line, baseUrl, headers))
+                rewrittenLines.push(this.rewriteTagAttributes(line, baseUrl, headers, preferredAudioLanguage))
                 continue
             }
 
@@ -294,6 +301,7 @@ export class ProxyService {
                 const resolvedUrl = this.resolveUrl(baseUrl, trimmedLine)
                 const proxiedUrl = this.createProxyUrl(resolvedUrl, headers, {
                     responseTransform,
+                    preferredAudioLanguage,
                 })
 
                 const indent = line.match(/^\s*/)?.[0] ?? ''
@@ -310,10 +318,10 @@ export class ProxyService {
         return /URI\s*=\s*["']([^"']+)["']/i.test(line)
     }
 
-    private rewriteTagAttributes(line: string, baseUrl: string, headers?: Record<string, string>): string {
+    private rewriteTagAttributes(line: string, baseUrl: string, headers?: Record<string, string>, preferredAudioLanguage?: string): string {
         return line.replace(/URI\s*=\s*["']([^"']+)["']/gi, (match, capturedUrl) => {
             const resolvedUrl = this.resolveUrl(baseUrl, capturedUrl)
-            const proxiedUrl = this.createProxyUrl(resolvedUrl, headers)
+            const proxiedUrl = this.createProxyUrl(resolvedUrl, headers, { preferredAudioLanguage })
 
             const quote = match.includes('"') ? '"' : "'"
             return `URI=${quote}${proxiedUrl}${quote}`
@@ -380,7 +388,7 @@ export class ProxyService {
      * Create a proxy URL for a given upstream URL
      * ALWAYS includes headers from the original request
      */
-    public createProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform'>): string {
+    public createProxyUrl(url: string, headers?: Record<string, string>, options?: Pick<ProxyData, 'responseTransform' | 'preferredAudioLanguage'>): string {
         const data = JSON.stringify({ url, headers, ...options })
         return `/v1/proxy?data=${encodeURIComponent(data)}`
     }
