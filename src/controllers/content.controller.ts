@@ -63,7 +63,10 @@ export class ContentController {
         }, this.sourceService.discoveryTimeoutMs() + 2000)
         deadline.unref()
         reply.hijack()
-        reply.raw.writeHead(200, { ...reply.getHeaders(), 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Accel-Buffering': 'no' })
+        for (const [name, value] of Object.entries(reply.getHeaders())) {
+            if (value !== undefined) reply.raw.setHeader(name, Array.isArray(value) ? value.map(String) : String(value))
+        }
+        reply.raw.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Accel-Buffering': 'no' })
         const emit = async (event: SourceDiscoveryEvent): Promise<void> => {
             if (controller.signal.aborted || reply.raw.destroyed) throw new DOMException('Client disconnected', 'AbortError')
             if (!reply.raw.write(JSON.stringify(event) + '\n'))
